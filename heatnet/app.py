@@ -4,6 +4,11 @@
 按真实调用链装到一起，并暴露四件事：操作编排（气象推送、调质调量、投运、调度、
 停运、拆分、定压改造）、控制循环、并发探测与状态快照。控制循环每个周期推进热源
 与二次网、把一次网跟随上去、落审计并采集趋势。
+
+装配顺序定死：先配置校验（不过就不登记点表），再登记现场点表，最后把配置声明
+的设备布局与已登记的点表双向交叉核一遍（见 :mod:`heatnet.assembly`）。结论落
+审计并供控制台展示；被判禁止的装配在启停时拦下，受限模式下被隔离的设备拒绝
+对应操作。
 """
 
 from __future__ import annotations
@@ -11,11 +16,19 @@ from __future__ import annotations
 import dataclasses
 import threading
 
+from .assembly import (
+    POLICY_BLOCK,
+    VERDICT_BLOCKED,
+    VERDICT_OK,
+    VERDICT_RESTRICTED,
+    AssemblyReport,
+    verify_assembly,
+)
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
-from .errors import PlantError
+from .errors import InterlockError, PlantError
 from .eventbus import Event, EventBus
 from .ids import IdFactory
 from .ns.registry import NamespaceRegistry
@@ -117,6 +130,12 @@ class Platform:
         self._operations = 0
         self._lock = threading.RLock()
         self._register_namespaces()
+        # 装配第三道工序：配置声明的布局与刚登记的现场点表双向交叉核对。
+        # 结论落审计并供控制台展示；被判禁止的装配在启停时拦下。
+        self.assembly: AssemblyReport = verify_assembly(
+            self.config.layout, self.zones, self.namespaces
+        )
+        self._announce_assembly()
         self._restore()
 
     # ---- 装配 ---------------------------------------------------------
@@ -179,6 +198,51 @@ class Platform:
             self.namespaces.register("station", name, "heat-exchange-station")
             self.namespaces.register("valve", f"{name}.mix", "mix-valve")
             self.namespaces.register("quota", f"{name}.heat-meter", "heat-meter")
+
+    def _announce_assembly(self) -> None:
+        """把装配校验结论落审计（控制台读的是同一份报告，口径一致）。"""
+
+        verdict = self.assembly.verdict
+        severity = {
+            VERDICT_OK: "notice",
+            VERDICT_RESTRICTED: "warning",
+            VERDICT_BLOCKED: "alarm",
+        }[verdict]
+        message = {
+            VERDICT_OK: "装配校验通过：配置与点表一致",
+            VERDICT_RESTRICTED: "装配校验放行受限模式：存在计量/监视类设备不一致",
+            VERDICT_BLOCKED: "装配校验未通过：存在联锁类设备不一致，禁止启动",
+        }[verdict]
+        self.bus.publish(
+            Event.of(
+                "assembly",
+                "assembly",
+                "assembly_checked",
+                severity=severity,
+                message=message,
+                **self.assembly.as_dict(),
+            )
+        )
+
+    def _ensure_assembly_clear(self) -> None:
+        """装配校验被判禁止时拦住启停，并说明是哪一边的问题。"""
+
+        if not self.assembly.blocked:
+            return
+        problems = "；".join(
+            finding.message
+            for finding in self.assembly.findings
+            if finding.policy == POLICY_BLOCK
+        )
+        raise InterlockError(f"装配校验未通过，禁止启动：{problems}", component="assembly")
+
+    def _ensure_not_fenced(self, address: str, action: str) -> None:
+        """受限模式下被装配校验隔离的设备拒绝对应操作。"""
+
+        if self.assembly.restricted(address):
+            raise InterlockError(
+                f"{address} 被装配校验隔离（受限模式），拒绝{action}", component="assembly"
+            )
 
     def _restore(self) -> None:
         """从落盘状态恢复平台计数与阀门开度。"""
@@ -271,13 +335,15 @@ class Platform:
     # ---- 生命周期 -----------------------------------------------------
 
     def start(self) -> dict:
-        """启动平台：核对命名空间与调度链拓扑。"""
+        """启动平台：核对装配结论、命名空间与调度链拓扑。"""
 
         with self._lock:
+            self._ensure_assembly_clear()
             report = self.topology.verify(set())
             source_device = self.namespaces.resolve("plant.heat_source")
             return {
                 "unit": self.unit,
+                "assembly_verdict": self.assembly.verdict,
                 "topology_missing": report["missing"],
                 "source_device": source_device.address,
                 "namespaces": self.namespaces.describe()["count"],
@@ -295,6 +361,7 @@ class Platform:
         """按调度链顺序把平台从冷态带到带负荷。"""
 
         with self._lock:
+            self._ensure_assembly_clear()
             op_id = self.ids.next()
             report = startup_plant(
                 self.source,
@@ -311,7 +378,7 @@ class Platform:
             summary = self._record_operation(op_id, "startup", report)
             self._operations += 1
             self._persist()
-            return {**report, **summary, "station": station}
+            return {**report, **summary, "station": station, "assembly_verdict": self.assembly.verdict}
 
     def shutdown(self, reason: str = "planned-shutdown") -> dict:
         """停运平台。"""
@@ -337,6 +404,7 @@ class Platform:
         """接收一次气象推送并让热源按新曲线点火。"""
 
         with self._lock:
+            self._ensure_not_fenced("plant.weather", "气象推送")
             op_id = self.ids.next()
             report = push_weather(
                 self.source,
@@ -559,6 +627,7 @@ class Platform:
         """采集一次热量并记进本期总账。"""
 
         with self._lock:
+            self._ensure_not_fenced(f"quota.{meter}", "热量采集")
             reading = self.meters.collect(meter, delta_mwh)
             self.ledger.allocate(meter[: -len(_METER_SUFFIX)], delta_mwh)
             self.trend.append("heat_mwh", self.clock.now(), self.meters.total_mwh())
@@ -780,6 +849,7 @@ class Platform:
             "cycles": self._cycles,
             "now": round(self.clock.now(), 3),
             "utc": self.clock.utc_iso(),
+            "assembly": self.assembly.as_dict(),
             "source": {
                 **self.source.snapshot().as_dict(),
                 "limits": [self.config.source.flow_min_t_h, self.config.source.flow_max_t_h],

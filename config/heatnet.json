@@ -3,6 +3,22 @@
     "name": "heatnet",
     "storage_root": "var/state"
   },
+  "layout": {
+    "zones": {
+      "east": ["st06"],
+      "north": ["st01", "st02", "st03"],
+      "south": ["st04", "st05"]
+    },
+    "devices": [
+      {"area": "plant", "device": "heat_source", "kind": "heat-source"},
+      {"area": "plant", "device": "weather", "kind": "weather-gateway"},
+      {"area": "primary", "device": "supply_header", "kind": "header"},
+      {"area": "primary", "device": "flow_meter", "kind": "flow-meter"},
+      {"area": "secondary", "device": "circulating_pump", "kind": "pump"},
+      {"area": "secondary", "device": "makeup_valve", "kind": "control-valve"},
+      {"area": "secondary", "device": "pressure_sensor", "kind": "pressure-sensor"}
+    ]
+  },
   "limits": {
     "source": {
       "supply_target_c": 92.0,

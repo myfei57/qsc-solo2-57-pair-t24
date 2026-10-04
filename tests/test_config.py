@@ -56,3 +56,57 @@ def test_primary_and_valve_helpers():
     assert config.primary.low_flow_threshold(2400.0) == pytest.approx(2400.0 - config.primary.flow_tolerance_t_h)
     assert config.valve.settled(50.0, 50.5) is True
     assert config.valve.settled(50.0, 60.0) is False
+
+
+def test_layout_roundtrips_through_mapping():
+    config = default_config()
+    restored = type(config).from_mapping(config_to_mapping(config))
+    assert restored.layout == config.layout
+    assert restored.layout.stations() == frozenset({"st01", "st02", "st03", "st04", "st05", "st06"})
+    addresses = [decl.address for decl in restored.layout.devices]
+    assert "plant.heat_source" in addresses
+    assert len(addresses) == len(set(addresses))
+
+
+def test_missing_layout_is_rejected():
+    mapping = config_to_mapping(default_config())
+    del mapping["layout"]
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)
+
+
+def test_duplicate_station_declaration_is_rejected():
+    mapping = config_to_mapping(default_config())
+    mapping["layout"]["zones"]["south"].append("st01")
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)
+
+
+def test_empty_zone_list_is_rejected():
+    mapping = config_to_mapping(default_config())
+    mapping["layout"]["zones"] = {}
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)
+
+
+def test_duplicate_device_address_is_rejected():
+    mapping = config_to_mapping(default_config())
+    mapping["layout"]["devices"].append(
+        {"area": "plant", "device": "weather", "kind": "weather-gateway"}
+    )
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)
+
+
+def test_empty_device_list_is_rejected():
+    mapping = config_to_mapping(default_config())
+    mapping["layout"]["devices"] = []
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)
+
+
+def test_device_entry_without_kind_is_rejected():
+    mapping = config_to_mapping(default_config())
+    mapping["layout"]["devices"][0] = {"area": "plant", "device": "heat_source"}
+    with pytest.raises(ConfigError):
+        type(default_config()).from_mapping(mapping)

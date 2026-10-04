@@ -64,6 +64,11 @@ class NamespaceRegistry:
 
         return sorted(self._devices)
 
+    def devices(self) -> list[Device]:
+        """返回全部已登记设备（按地址排序）。"""
+
+        return [self._devices[address] for address in self.addresses()]
+
     def by_kind(self, kind: str) -> list[Device]:
         """按设备类型筛选。"""
 

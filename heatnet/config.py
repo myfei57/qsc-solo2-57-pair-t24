@@ -3,8 +3,12 @@
 配置来自 JSON 文件（标准库解析），覆盖热源供温带与调质确认时间、供热曲线的
 室外温度区间与过期时间、换热站混水阀行程与批量确认时间、一次网流量基线与
 调度速率、二次网补水定压带、阀门行程公差、循环泵升速斜率、定压基线范围与
-热量表回绕阈值，以及状态存储目录。任何缺失或越界取值都在装配阶段抛出
-:class:`ConfigError`，不允许带着半份配置启动控制链。
+热量表回绕阈值、状态存储目录，以及设备布局声明（分区辖站与受管设备清单）。
+任何缺失或越界取值都在装配阶段抛出 :class:`ConfigError`，不允许带着半份
+配置启动控制链。
+
+布局声明是装配交叉核对的"配置一侧"：它声明调度要管哪些站、哪些现场设备；
+现场点表实际登记了什么由 :mod:`heatnet.assembly` 在装配末段双向核对。
 """
 
 from __future__ import annotations
@@ -277,6 +281,84 @@ class QuotaLimits:
 
 
 @dataclass(frozen=True)
+class DeviceDecl:
+    """配置声明的一台受管现场设备。"""
+
+    area: str
+    device: str
+    kind: str
+
+    @property
+    def address(self) -> str:
+        return f"{self.area}.{self.device}"
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "DeviceDecl":
+        if not isinstance(section, Mapping):
+            raise ConfigError("layout.devices 的条目必须是映射", component="config")
+        area = section.get("area")
+        device = section.get("device")
+        kind = section.get("kind")
+        if not isinstance(area, str) or not area:
+            raise ConfigError("layout.devices 条目缺少非空 area", component="config")
+        if not isinstance(device, str) or not device:
+            raise ConfigError("layout.devices 条目缺少非空 device", component="config")
+        if not isinstance(kind, str) or not kind:
+            raise ConfigError("layout.devices 条目缺少非空 kind", component="config")
+        return cls(area=area, device=device, kind=kind)
+
+    def as_dict(self) -> dict:
+        return {"area": self.area, "device": self.device, "kind": self.kind}
+
+
+@dataclass(frozen=True)
+class LayoutConfig:
+    """配置声明的设备布局：分区辖站清单与受管现场设备清单。"""
+
+    zones: tuple[tuple[str, tuple[str, ...]], ...]
+    devices: tuple[DeviceDecl, ...]
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "LayoutConfig":
+        raw_zones = _section(section, "zones")
+        zones: list[tuple[str, tuple[str, ...]]] = []
+        seen: set[str] = set()
+        for name, stations in raw_zones.items():
+            if not isinstance(name, str) or not name:
+                raise ConfigError("layout.zones 的分区名必须是非空字符串", component="config")
+            if not isinstance(stations, list) or not stations:
+                raise ConfigError(f"分区 {name!r} 的站列表必须是非空列表", component="config")
+            for station in stations:
+                if not isinstance(station, str) or not station:
+                    raise ConfigError(f"分区 {name!r} 的站名必须是非空字符串", component="config")
+                if station in seen:
+                    raise ConfigError(f"换热站 {station!r} 被重复声明", component="config")
+                seen.add(station)
+            zones.append((name, tuple(stations)))
+        if not zones:
+            raise ConfigError("layout.zones 至少要声明一个分区", component="config")
+        zones.sort(key=lambda item: item[0])
+
+        raw_devices = section.get("devices", _MISSING)
+        if raw_devices is _MISSING or not isinstance(raw_devices, list) or not raw_devices:
+            raise ConfigError("layout.devices 必须是非空列表", component="config")
+        devices: list[DeviceDecl] = []
+        addresses: set[str] = set()
+        for entry in raw_devices:
+            decl = DeviceDecl.from_mapping(entry)
+            if decl.address in addresses:
+                raise ConfigError(f"设备地址重复声明: {decl.address}", component="config")
+            addresses.add(decl.address)
+            devices.append(decl)
+        return cls(zones=tuple(zones), devices=tuple(devices))
+
+    def stations(self) -> frozenset[str]:
+        """全部声明的换热站。"""
+
+        return frozenset(station for _zone, stations in self.zones for station in stations)
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     """一份完整的平台配置。"""
 
@@ -291,6 +373,7 @@ class PlatformConfig:
     pump: PumpLimits
     pressure: PressureLimits
     quota: QuotaLimits
+    layout: LayoutConfig
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "PlatformConfig":
@@ -315,6 +398,7 @@ class PlatformConfig:
             pump=PumpLimits.from_mapping(_section(limits, "pump")),
             pressure=PressureLimits.from_mapping(_section(limits, "pressure")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            layout=LayoutConfig.from_mapping(_section(mapping, "layout")),
         )
 
 
@@ -345,6 +429,24 @@ def default_config() -> PlatformConfig:
         pump=PumpLimits(40.0, 20.0, 100.0),
         pressure=PressureLimits(240.0, 430.0, 6.0),
         quota=QuotaLimits(100000.0, 30.0, 24.0),
+        # 布局声明与 app.py 里的现场点表（_ZONE_SPECS 与内置设备）一一对应；
+        # 一边是配置声明，一边是现场登记，装配末段的交叉核对专门抓两边的漂移。
+        layout=LayoutConfig(
+            zones=(
+                ("east", ("st06",)),
+                ("north", ("st01", "st02", "st03")),
+                ("south", ("st04", "st05")),
+            ),
+            devices=(
+                DeviceDecl("plant", "heat_source", "heat-source"),
+                DeviceDecl("plant", "weather", "weather-gateway"),
+                DeviceDecl("primary", "supply_header", "header"),
+                DeviceDecl("primary", "flow_meter", "flow-meter"),
+                DeviceDecl("secondary", "circulating_pump", "pump"),
+                DeviceDecl("secondary", "makeup_valve", "control-valve"),
+                DeviceDecl("secondary", "pressure_sensor", "pressure-sensor"),
+            ),
+        ),
     )
 
 
@@ -353,6 +455,10 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
 
     return {
         "platform": {"name": cfg.name, "storage_root": cfg.storage_root},
+        "layout": {
+            "zones": {name: list(stations) for name, stations in cfg.layout.zones},
+            "devices": [decl.as_dict() for decl in cfg.layout.devices],
+        },
         "limits": {
             "source": {
                 "supply_target_c": cfg.source.supply_target_c,

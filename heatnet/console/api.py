@@ -39,6 +39,7 @@ class Api:
         add("GET", "/api/status", lambda params, body: self._platform.status())
         add("GET", "/api/snapshot", lambda params, body: self._platform.snapshot())
         add("GET", "/api/topology", self._topology)
+        add("GET", "/api/assembly", lambda params, body: self._platform.assembly.as_dict())
         add("GET", "/api/namespaces", self._namespaces)
         add("GET", "/api/zones", lambda params, body: self._platform.zones.describe())
         add("GET", "/api/zone/{name}", self._zone)
