@@ -10,6 +10,6 @@ from __future__ import annotations
 
 __version__ = "1.0.0"
 
-from .app import Platform, build_platform
+from .app import Platform, assemble_platform, build_platform
 
-__all__ = ["Platform", "build_platform", "__version__"]
+__all__ = ["Platform", "assemble_platform", "build_platform", "__version__"]

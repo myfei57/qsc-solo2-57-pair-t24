@@ -323,8 +323,13 @@ def load_config(path: str) -> PlatformConfig:
 
     if not os.path.isfile(path):
         raise ConfigError(f"配置文件不存在: {path}", component="config")
-    with open(path, "r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except json.JSONDecodeError as error:
+        # 配置文件损坏属于读取失败（部分失败）：装配阶段只拿到半份配置，
+        # 必须按 ConfigError 拦下，不允许继续登记点表或启动。
+        raise ConfigError(f"配置文件不是合法 JSON: {error}", component="config") from error
     if not isinstance(raw, Mapping):
         raise ConfigError("配置文件顶层必须是映射", component="config")
     return PlatformConfig.from_mapping(raw)

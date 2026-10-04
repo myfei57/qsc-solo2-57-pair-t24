@@ -11,11 +11,16 @@ from __future__ import annotations
 import dataclasses
 import threading
 
+from .assembly import (
+    AssemblyReport,
+    assemble,
+    expected_devices,
+)
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .clock import Clock, SystemClock
 from .config import PlatformConfig, default_config
-from .errors import PlantError
+from .errors import AssemblyError, PlantError
 from .eventbus import Event, EventBus
 from .ids import IdFactory
 from .ns.registry import NamespaceRegistry
@@ -67,6 +72,12 @@ _ZONE_SPECS: tuple[tuple[str, float, tuple[str, ...]], ...] = (
 _METER_SUFFIX = ".heat-meter"
 
 
+def _configured_station_names() -> tuple[str, ...]:
+    """配置声明的全部换热站名（按分区表登记顺序）。"""
+
+    return tuple(station for _, _, stations in _ZONE_SPECS for station in stations)
+
+
 class Platform:
     """城市集中供热管网调度平台。"""
 
@@ -75,11 +86,18 @@ class Platform:
         config: PlatformConfig | None = None,
         clock: Clock | None = None,
         unit: str = DEFAULT_UNIT,
+        assembly_report: AssemblyReport | None = None,
     ) -> None:
         self.config = config or default_config()
         self.clock = clock or SystemClock()
         self.bus = EventBus()
         self.unit = unit
+        self.assembly_report = assembly_report or AssemblyReport(
+            stage="points",
+            verdict="ok",
+            point_count=len(expected_devices(_configured_station_names())),
+            config_device_count=len(expected_devices(_configured_station_names())),
+        )
 
         store = JsonStore(self.config.storage_root)
         self.store = store
@@ -118,6 +136,7 @@ class Platform:
         self._lock = threading.RLock()
         self._register_namespaces()
         self._restore()
+        self._record_assembly()
 
     # ---- 装配 ---------------------------------------------------------
 
@@ -202,6 +221,61 @@ class Platform:
             reason = str(trips[-1].payload.get("reason", "unknown"))
             self.source.trip(reason)
 
+    def _record_assembly(self) -> None:
+        """把装配交叉核对结论落审计（结论与控制台展示同一份数据）。"""
+
+        report = self.assembly_report
+        if report.ok:
+            severity = "notice"
+            message = "装配交叉核对通过，配置与设备点表一致"
+        elif report.restricted:
+            severity = "warning"
+            message = (
+                f"装配存在 {len(report.discrepancies)} 处非关键设备不一致，"
+                "带受限模式放行"
+            )
+        else:
+            severity = "alarm"
+            if report.stage == "config":
+                message = f"配置读取失败（部分失败），禁止启动：{report.config_error}"
+            else:
+                message = (
+                    f"装配交叉核对发现 {len(report.discrepancies)} 处关键不一致，"
+                    "禁止启动"
+                )
+        payload = report.as_dict()
+        self.audit.record(
+            AuditRecord.create(
+                self.clock.now(),
+                "",
+                "assembly",
+                "assembly_check",
+                severity=severity,
+                message=message,
+                verdict=report.verdict,
+                stage=report.stage,
+                counts=payload["counts"],
+                responsibility=payload["responsibility"],
+            )
+        )
+
+    def _require_startable(self) -> None:
+        """启动闸门：装配结论为 blocked 时拒绝启动。"""
+
+        report = self.assembly_report
+        if report.blocked:
+            if report.stage == "config":
+                detail = f"配置读取失败：{report.config_error}"
+            else:
+                parts = []
+                for item in report.discrepancies:
+                    if item.policy != "block":
+                        continue
+                    side = {"config": "配置侧", "points": "点表侧", "both": "双边"}[item.responsibility]
+                    parts.append(f"{side}{item.code} {item.address}")
+                detail = "；".join(parts) or "关键设备不一致"
+            raise AssemblyError(f"平台未通过装配核对，禁止启动（{detail}）", component="assembly")
+
     def _persist(self) -> None:
         """落盘平台计数，供重启后对照。"""
 
@@ -271,13 +345,20 @@ class Platform:
     # ---- 生命周期 -----------------------------------------------------
 
     def start(self) -> dict:
-        """启动平台：核对命名空间与调度链拓扑。"""
+        """启动平台：先过装配闸门，再核对命名空间与调度链拓扑。
+
+        装配结论为 ``blocked`` 直接拒绝（抛 :class:`AssemblyError`）；
+        ``restricted`` 放行但在返回里标注受限设备。
+        """
 
         with self._lock:
+            self._require_startable()
             report = self.topology.verify(set())
             source_device = self.namespaces.resolve("plant.heat_source")
             return {
                 "unit": self.unit,
+                "assembly": self.assembly_report.as_dict(),
+                "restricted": self.assembly_report.restricted,
                 "topology_missing": report["missing"],
                 "source_device": source_device.address,
                 "namespaces": self.namespaces.describe()["count"],
@@ -295,6 +376,7 @@ class Platform:
         """按调度链顺序把平台从冷态带到带负荷。"""
 
         with self._lock:
+            self._require_startable()
             op_id = self.ids.next()
             report = startup_plant(
                 self.source,
@@ -776,6 +858,7 @@ class Platform:
         return {
             "platform": self.config.name,
             "unit": self.unit,
+            "assembly": self.assembly_report.as_dict(),
             "operations": self._operations,
             "cycles": self._cycles,
             "now": round(self.clock.now(), 3),
@@ -861,10 +944,62 @@ def build_platform(
     clock: Clock | None = None,
     storage_root: str | None = None,
     unit: str = DEFAULT_UNIT,
+    assembly_report: AssemblyReport | None = None,
 ) -> Platform:
     """构造一个平台；``storage_root`` 可覆盖配置里的存储目录。"""
 
     base = config or default_config()
     if storage_root is not None:
         base = dataclasses.replace(base, storage_root=storage_root)
-    return Platform(base, clock=clock, unit=unit)
+    return Platform(base, clock=clock, unit=unit, assembly_report=assembly_report)
+
+
+def assemble_platform(
+    config: PlatformConfig | None = None,
+    *,
+    config_path: str | None = None,
+    point_table_path: str | None = None,
+    clock: Clock | None = None,
+    storage_root: str | None = None,
+    unit: str = DEFAULT_UNIT,
+) -> Platform:
+    """完整装配入口：先读配置校验，再登记点表并双向交叉核对。
+
+    - 传入 ``config`` 时直接用该配置（视为已校验）；
+    - 否则用 ``config_path`` 读取，读取失败属部分失败：返回的平台装配结论为
+      ``blocked``，且装配阶段停在 ``config``（从未去读点表）；
+    - ``point_table_path`` 为空时使用与配置一致的内置点表；
+    - ``storage_root`` 覆盖配置里的存储目录。
+    """
+
+    station_names = _configured_station_names()
+
+    if config is not None:
+        base = config
+        resolved, points, report = assemble(
+            lambda: base, station_names, point_table_path=point_table_path
+        )
+    else:
+        from .config import load_config
+
+        def _load() -> PlatformConfig:
+            if config_path is None:
+                return default_config()
+            return load_config(config_path)
+
+        resolved, points, report = assemble(
+            _load, station_names, point_table_path=point_table_path
+        )
+
+    # 配置读取失败：无有效配置可用于建平台，直接按 blocked 抛出，禁止半份配置启动。
+    if resolved is None:
+        raise AssemblyError(
+            f"配置读取失败，禁止带着半份配置启动：{report.config_error}",
+            component="assembly",
+        )
+
+    effective = resolved
+    if storage_root is not None:
+        effective = dataclasses.replace(effective, storage_root=storage_root)
+        # storage_root 覆盖不影响交叉核对结论，但报告里仍是原配置，属元数据无关项。
+    return Platform(effective, clock=clock, unit=unit, assembly_report=report)

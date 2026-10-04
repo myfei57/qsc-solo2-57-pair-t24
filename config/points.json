@@ -1,0 +1,104 @@
+{
+  "points": [
+    {
+      "address": "plant.heat_source",
+      "kind": "heat-source"
+    },
+    {
+      "address": "plant.weather",
+      "kind": "weather-gateway"
+    },
+    {
+      "address": "primary.supply_header",
+      "kind": "header"
+    },
+    {
+      "address": "primary.flow_meter",
+      "kind": "flow-meter"
+    },
+    {
+      "address": "secondary.circulating_pump",
+      "kind": "pump"
+    },
+    {
+      "address": "secondary.makeup_valve",
+      "kind": "control-valve"
+    },
+    {
+      "address": "secondary.pressure_sensor",
+      "kind": "pressure-sensor"
+    },
+    {
+      "address": "station.st01",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st01.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st01.heat-meter",
+      "kind": "heat-meter"
+    },
+    {
+      "address": "station.st02",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st02.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st02.heat-meter",
+      "kind": "heat-meter"
+    },
+    {
+      "address": "station.st03",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st03.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st03.heat-meter",
+      "kind": "heat-meter"
+    },
+    {
+      "address": "station.st04",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st04.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st04.heat-meter",
+      "kind": "heat-meter"
+    },
+    {
+      "address": "station.st05",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st05.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st05.heat-meter",
+      "kind": "heat-meter"
+    },
+    {
+      "address": "station.st06",
+      "kind": "heat-exchange-station"
+    },
+    {
+      "address": "valve.st06.mix",
+      "kind": "mix-valve"
+    },
+    {
+      "address": "quota.st06.heat-meter",
+      "kind": "heat-meter"
+    }
+  ]
+}

@@ -18,7 +18,7 @@ import json
 import sys
 import time
 
-from .app import Platform, build_platform
+from .app import Platform, assemble_platform
 from .clock import ManualClock, SystemClock
 from .config import config_to_mapping, default_config, load_config
 from .console.server import ConsoleServer, probe_endpoints
@@ -27,6 +27,7 @@ from .errors import PlantError
 DEFAULT_PROBE_PATHS = (
     "/api/status",
     "/api/readiness",
+    "/api/assembly",
     "/api/topology",
     "/api/audit",
     "/api/stations",
@@ -35,10 +36,22 @@ DEFAULT_PROBE_PATHS = (
 
 
 def _build(args: argparse.Namespace) -> Platform:
-    config = load_config(args.config) if getattr(args, "config", None) else default_config()
-    if getattr(args, "storage_root", None):
-        return build_platform(config, storage_root=args.storage_root)
-    return Platform(config=config)
+    config_path = getattr(args, "config", None)
+    point_table_path = getattr(args, "point_table", None)
+    storage_root = getattr(args, "storage_root", None)
+    if config_path:
+        # 走完整装配：配置读取失败/交叉核对 blocked 会在启动前被拦下。
+        return assemble_platform(
+            config_path=config_path,
+            point_table_path=point_table_path,
+            storage_root=storage_root,
+        )
+    # 未指定配置文件：用内置默认配置，但点表（若指定）仍要交叉核对。
+    return assemble_platform(
+        config=default_config(),
+        point_table_path=point_table_path,
+        storage_root=storage_root,
+    )
 
 
 def _dump(payload: object) -> None:
@@ -71,8 +84,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 def _cmd_demo(args: argparse.Namespace) -> int:
     clock = ManualClock() if args.fast else SystemClock()
     config_path = getattr(args, "config", None)
-    config = load_config(config_path) if config_path else default_config()
-    platform = build_platform(config, clock=clock, storage_root=getattr(args, "storage_root", None))
+    platform = assemble_platform(
+        config=None if config_path else default_config(),
+        config_path=config_path,
+        point_table_path=getattr(args, "point_table", None),
+        clock=clock,
+        storage_root=getattr(args, "storage_root", None),
+    )
 
     # 演示从干净基线起步：先清掉上一轮落盘的平台计数，并解除上一轮演示结束时
     # 留下的停机保护，否则这一次会直接从带故障的状态起跑。
@@ -168,6 +186,16 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_assembly(args: argparse.Namespace) -> int:
+    """只做装配交叉核对并打印结论（不启动控制链）。"""
+
+    platform = _build(args)
+    report = platform.assembly_report.as_dict()
+    _dump(report)
+    # blocked 返回非零，便于部署脚本在启动前据此拦截；受限模式返回 0。
+    return 1 if platform.assembly_report.blocked else 0
+
+
 def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     removed = platform.reset_state()
@@ -180,6 +208,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", help="JSON 配置文件路径", default=argparse.SUPPRESS)
+    common.add_argument(
+        "--point-table",
+        dest="point_table",
+        help="设备点表 JSON 文件路径（装配时与配置交叉核对）",
+        default=argparse.SUPPRESS,
+    )
     common.add_argument("--storage-root", help="覆盖状态存储目录", default=argparse.SUPPRESS)
     parser = argparse.ArgumentParser(
         prog="heatnet", description="工业过程顺序与联锁控制服务", parents=[common]
@@ -216,6 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     config = sub.add_parser("config", help="打印生效配置", parents=[common])
     config.set_defaults(func=_cmd_config)
+
+    assembly = sub.add_parser("assembly", help="装配交叉核对配置与设备点表", parents=[common])
+    assembly.set_defaults(func=_cmd_assembly)
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)

@@ -58,6 +58,7 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/assembly", self._assembly)
         add("POST", "/api/weather", self._weather)
         add("POST", "/api/adjust", self._adjust)
         add("POST", "/api/startup", self._startup)
@@ -231,9 +232,22 @@ class Api:
             "platform_state": self._platform.store.read("platform_state"),
         }
 
+    def _assembly(self, params: dict, body: dict) -> dict:
+        """装配交叉核对结论，供控制台在启动前展示缺项/多项与责任侧。"""
+
+        report = self._platform.assembly_report
+        return {
+            **report.as_dict(),
+            "config_side": [item.as_dict() for item in report.by_responsibility("config")],
+            "point_side": [item.as_dict() for item in report.by_responsibility("points")],
+            "both_side": [item.as_dict() for item in report.by_responsibility("both")],
+        }
+
     def _readiness(self, params: dict, body: dict) -> dict:
         platform = self._platform
+        assembly = platform.assembly_report
         checks = {
+            "assembly_passed": assembly.ok,
             "curve_fresh": not platform.curve.is_stale(platform.clock.now()),
             "source_online": platform.source.state() == "online",
             "flow_above_threshold": not platform.network.low_flow(),
@@ -241,12 +255,22 @@ class Api:
             and not platform.secondary.overpressure(),
         }
         info = {
+            "assembly_verdict": assembly.verdict,
+            "restricted": assembly.restricted,
             "source_state": platform.source.state(),
             "supply_c": round(platform.source.temperature_c(), 2),
             "flow_t_h": round(platform.network.flow_t_h(), 2),
             "last_audit_ts": platform.audit.tail(1)[-1]["ts"] if platform.audit.tail(1) else None,
         }
-        return {"ready": all(checks.values()), "checks": checks, "info": info}
+        ready = not assembly.blocked and all(
+            value for key, value in checks.items() if key != "assembly_passed"
+        )
+        return {
+            "ready": ready,
+            "checks": checks,
+            "info": info,
+            "assembly": assembly.as_dict(),
+        }
 
     # ---- 动作 ---------------------------------------------------------
 

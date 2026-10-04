@@ -43,6 +43,14 @@ class ConfigError(PlantError):
     """配置缺失或取值非法。"""
 
 
+class PointTableError(PlantError):
+    """设备点表读取失败或条目非法。"""
+
+
+class AssemblyError(PlantError):
+    """装配交叉核对未通过，平台不允许启动。"""
+
+
 class NamespaceError(PlantError):
     """命名空间重复注册或解析失败。"""
 
